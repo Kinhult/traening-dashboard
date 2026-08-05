@@ -5,3 +5,4 @@ folium>=0.17.0
 streamlit-folium>=0.23.0
 gpxpy>=1.6.2
 openai>=1.40.0
+supabase
