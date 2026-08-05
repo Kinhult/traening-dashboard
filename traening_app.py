@@ -1,20 +1,24 @@
 # -*- coding: utf-8 -*-
 """
 traening_app.py
-Träning & Hälsa – en mobilanpassad Streamlit-dashboard i "Strava Premium"-stil.
+Träning & Hälsa – mobilanpassad Streamlit-dashboard i "Strava Premium"-stil.
+
+Datan lagras 100% i molnet (Supabase/Postgres) – inga lokala filer.
+Apple Hälsa-data strömmar in automatiskt i bakgrunden via iPhone-appen
+"Health Auto Export" -> en Supabase Edge Function -> databasen.
 
 Funktioner:
-- Import av Apple Hälsa-data (export.xml) samt CSV/JSON
+- Lösenordsskyddad inloggning
+- Live-koppling mot Supabase (läsning + skrivning)
 - Sömn, HRV, vilopuls, kroppsmått, andningsfrekvens, syresättning
-- Träningsarkiv med sök/filter samt kartvisning (GPX-rutter)
+- Träningsarkiv med sök/filter samt kartvisning (rutter lagrade som JSON i DB)
+- Engångsimport av historik (gammal Apple Hälsa-export eller CSV) rakt in i molnet
 - Målsättning + AI-genererat dynamiskt veckoschema
 - Inbyggd AI-tränarchatt (regelbaserad + valfri OpenAI-koppling)
 - Styrketräningslogg (Nordic Wellness-övningsbank) + muskelåterhämtning
 """
 
-import os
 import re
-import json
 import uuid
 from datetime import datetime, timedelta, date
 
@@ -26,6 +30,12 @@ import xml.etree.ElementTree as ET
 # ---------------------------------------------------------------------------
 # Valfria bibliotek (appen ska inte krascha om något saknas)
 # ---------------------------------------------------------------------------
+try:
+    from supabase import create_client
+    SUPABASE_LIB_OK = True
+except ImportError:
+    SUPABASE_LIB_OK = False
+
 try:
     import folium
     from streamlit_folium import st_folium
@@ -45,6 +55,12 @@ try:
 except ImportError:
     OPENAI_LIB_OK = False
 
+try:
+    from streamlit_autorefresh import st_autorefresh
+    AUTOREFRESH_OK = True
+except ImportError:
+    AUTOREFRESH_OK = False
+
 
 # =============================================================================
 # GRUNDINSTÄLLNINGAR
@@ -56,42 +72,13 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-DATA_DIR = "data"
-ROUTES_DIR = os.path.join(DATA_DIR, "routes")
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(ROUTES_DIR, exist_ok=True)
-
-FILES = {
-    "workouts": os.path.join(DATA_DIR, "workouts.csv"),
-    "sleep": os.path.join(DATA_DIR, "sleep.csv"),
-    "recovery": os.path.join(DATA_DIR, "recovery.csv"),
-    "body": os.path.join(DATA_DIR, "body.csv"),
-    "physio": os.path.join(DATA_DIR, "physio.csv"),
-    "strength": os.path.join(DATA_DIR, "strength.csv"),
-    "goals": os.path.join(DATA_DIR, "goals.csv"),
-}
-
-SCHEMAS = {
-    "workouts": ["id", "date", "type", "duration_min", "distance_km", "calories",
-                 "avg_hr", "max_hr", "elevation_gain", "route_file", "notes"],
-    "sleep": ["date", "duration_hours", "quality_score", "deep_hours", "rem_hours", "awake_min"],
-    "recovery": ["date", "hrv_ms", "resting_hr"],
-    "body": ["date", "weight_kg", "height_cm"],
-    "physio": ["date", "respiratory_rate", "spo2"],
-    "strength": ["id", "date", "muscle_group", "exercise", "equipment",
-                 "sets", "reps", "weight_kg", "rpe", "notes"],
-    "goals": ["race_name", "race_date", "race_distance_km", "target_time", "sessions_per_week"],
-}
-
 MUSCLE_GROUPS = ["Bröst", "Rygg", "Axlar", "Biceps", "Triceps", "Ben", "Rumpa", "Vader", "Core"]
 
-# Ungefärligt antal timmar för full återhämtning per muskelgrupp
 RECOVERY_HOURS = {
     "Bröst": 72, "Rygg": 72, "Axlar": 48, "Biceps": 48, "Triceps": 48,
     "Ben": 72, "Rumpa": 72, "Vader": 48, "Core": 30,
 }
 
-# Nordic Wellness-inspirerad övningsbank
 EXERCISE_BANK = {
     "Bröst": ["Bänkpress (Eleiko skivstång)", "Hantelpress (Eleiko hantlar)",
               "Chest Press (Gymleco)", "Cable Fly (Kabelmaskin)",
@@ -115,9 +102,49 @@ EXERCISE_BANK = {
              "Russian twist", "Ab Crunch (Technogym)"],
 }
 
+SCHEMAS = {
+    "workouts": ["id", "date", "type", "duration_min", "distance_km", "calories",
+                 "avg_hr", "max_hr", "elevation_gain", "route", "notes"],
+    "sleep": ["date", "duration_hours", "quality_score", "deep_hours", "rem_hours", "awake_min"],
+    "recovery": ["date", "hrv_ms", "resting_hr"],
+    "body": ["date", "weight_kg", "height_cm"],
+    "physio": ["date", "respiratory_rate", "spo2"],
+    "strength": ["id", "date", "muscle_group", "exercise", "equipment",
+                 "sets", "reps", "weight_kg", "rpe", "notes"],
+    "goals": ["id", "race_name", "race_date", "race_distance_km", "target_time", "sessions_per_week"],
+}
+
 
 # =============================================================================
-# STIL – mobilanpassad "Strava Premium"-look
+# LÖSENORDSGRIND (Säkerhet)[cite: 5]
+# =============================================================================
+def check_password():
+    """Returnerar True om användaren angett rätt lösenord."""
+    def password_entered():
+        if st.session_state["password"] == st.secrets.get("APP_PASSWORD", "bytt-detta-losenord"):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.markdown("<h2 style='text-align: center;'>🔐 Logga in</h2>", unsafe_allow_html=True)
+        st.text_input("Ange lösenord för att öppna träningsappen", type="password", on_change=password_entered, key="password")
+        return False
+    elif not st.session_state["password_correct"]:
+        st.markdown("<h2 style='text-align: center;'>🔐 Logga in</h2>", unsafe_allow_html=True)
+        st.text_input("Ange lösenord för att öppna träningsappen", type="password", on_change=password_entered, key="password")
+        st.error("😕 Fel lösenord, försök igen.")
+        return False
+    else:
+        return True
+
+if not check_password():
+    st.stop()
+
+
+# =============================================================================
+# STIL – mobilanpassad "Strava Premium"-look[cite: 5]
 # =============================================================================
 st.markdown("""
 <style>
@@ -128,19 +155,15 @@ header {visibility: hidden;}
 html, body, [class*="css"] {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
 }
-
 .stApp {
     background: linear-gradient(180deg, #0f1115 0%, #14161c 100%);
     color: #f2f2f2;
 }
-
 .block-container {
     padding-top: 1.2rem;
     padding-bottom: 5rem;
     max-width: 620px;
 }
-
-/* Kort */
 .glass-card {
     background: linear-gradient(145deg, #1c1f26, #181a20);
     border: 1px solid rgba(255,255,255,0.06);
@@ -160,12 +183,9 @@ html, body, [class*="css"] {
 .metric-value { font-size: 1.55rem; font-weight: 700; color: #ffffff; }
 .metric-label { font-size: 0.72rem; color: #9aa0aa; text-transform: uppercase; letter-spacing: .06em; }
 .metric-sub { font-size: 0.72rem; color: #FC5200; font-weight: 600; }
-
 .app-title { font-size: 1.7rem; font-weight: 800; color: #fff; margin-bottom: 0px;}
 .app-sub { color: #9aa0aa; font-size: 0.85rem; margin-top: -6px; margin-bottom: 12px;}
-
 .section-title { font-size: 1.05rem; font-weight: 700; color: #fff; margin: 18px 0 8px 0; }
-
 .badge {
     display:inline-block; padding: 3px 10px; border-radius: 999px;
     font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing:.04em;
@@ -174,93 +194,98 @@ html, body, [class*="css"] {
 .badge-green{ background: rgba(0,200,120,0.18); color:#00c878; }
 .badge-blue{ background: rgba(60,140,255,0.18); color:#3c8cff; }
 .badge-red{ background: rgba(255,70,70,0.18); color:#ff4646; }
-
 .workout-row {
     background: #1c1f26; border-radius: 14px; padding: 12px 16px; margin-bottom: 8px;
     border: 1px solid rgba(255,255,255,0.05);
 }
 .wr-title { font-weight: 700; color:#fff; font-size: 0.95rem;}
 .wr-sub { color:#9aa0aa; font-size: 0.78rem; }
-
 .bar-bg { background:#2a2d35; border-radius: 8px; height: 10px; width:100%; overflow:hidden; }
 .bar-fill { height: 10px; border-radius: 8px; background: linear-gradient(90deg,#FC5200,#ff8a3d); }
-
 hr { border-color: rgba(255,255,255,0.08); }
-
 div[data-testid="stChatInput"] textarea { background-color:#1c1f26; color:#fff; }
-
 .stTabs [data-baseweb="tab-list"] { gap: 4px; }
 .stTabs [data-baseweb="tab"] {
     background-color:#1c1f26; border-radius: 12px 12px 0 0; padding: 8px 10px; color:#9aa0aa;
 }
 .stTabs [aria-selected="true"] { color:#FC5200 !important; font-weight:700; }
+.conn-ok { color:#00c878; font-size:0.75rem; }
+.conn-bad { color:#ff4646; font-size:0.75rem; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # =============================================================================
-# DATAHANTERING
+# SUPABASE-ANSLUTNING[cite: 5]
 # =============================================================================
 def _empty_df(name):
     return pd.DataFrame(columns=SCHEMAS[name])
 
 
-def load_df(name):
-    path = FILES[name]
-    if os.path.exists(path):
-        try:
-            df = pd.read_csv(path)
-            for col in SCHEMAS[name]:
-                if col not in df.columns:
-                    df[col] = np.nan
-            return df[SCHEMAS[name]]
-        except Exception:
+@st.cache_resource
+def get_supabase_client():
+    if not SUPABASE_LIB_OK:
+        return None
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except Exception:
+        return None
+
+
+supabase = get_supabase_client()
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def load_table(name: str) -> pd.DataFrame:
+    """Läser en tabell live från Supabase (cachad 45 sekunder)."""
+    if supabase is None:
+        return _empty_df(name)
+    try:
+        res = supabase.table(name).select("*").execute()
+        rows = res.data or []
+        if not rows:
             return _empty_df(name)
-    return _empty_df(name)
+        df = pd.DataFrame(rows)
+        for col in SCHEMAS[name]:
+            if col not in df.columns:
+                df[col] = np.nan
+        return df[SCHEMAS[name]]
+    except Exception as e:
+        st.session_state["_last_db_error"] = str(e)
+        return _empty_df(name)
 
 
-def save_df(name, df):
-    df.to_csv(FILES[name], index=False)
+def refresh_data():
+    load_table.clear()
 
 
-def init_state():
-    if "data" not in st.session_state:
-        st.session_state.data = {name: load_df(name) for name in FILES}
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = [
-            {"role": "assistant", "content":
-             "Hej! Jag är din AI-tränarcoach 💪. Fråga mig om din återhämtning, "
-             "sömn, träningsschema – eller säg t.ex. *'lägg till bänkpress bröst 3x8 70kg'* "
-             "för att logga ett styrkepass direkt här i chatten."}
-        ]
-    if "selected_workout" not in st.session_state:
-        st.session_state.selected_workout = None
-    if "openai_key" not in st.session_state:
-        st.session_state.openai_key = ""
+def db_insert(name: str, row: dict):
+    if supabase is None:
+        st.error("Ingen databaskoppling – kontrollera Supabase-secrets.")
+        return
+    supabase.table(name).insert(row).execute()
+    refresh_data()
 
 
-def add_row(name, row: dict):
-    df = st.session_state.data[name]
-    new_row = pd.DataFrame([row])
-    df = pd.concat([df, new_row], ignore_index=True)
-    st.session_state.data[name] = df
-    save_df(name, df)
+def db_upsert(name: str, rows, on_conflict: str):
+    if supabase is None or not rows:
+        return 0
+    supabase.table(name).upsert(rows, on_conflict=on_conflict).execute()
+    refresh_data()
+    return len(rows)
 
 
-def upsert_bulk(name, new_df: pd.DataFrame, dedup_cols):
-    old_df = st.session_state.data[name]
-    combined = pd.concat([old_df, new_df], ignore_index=True)
-    combined = combined.drop_duplicates(subset=dedup_cols, keep="last")
-    st.session_state.data[name] = combined
-    save_df(name, combined)
-    return len(combined) - len(old_df)
-
-
-init_state()
+def db_update_field(name: str, match_col: str, match_val, field: str, value):
+    if supabase is None:
+        return
+    supabase.table(name).update({field: value}).eq(match_col, match_val).execute()
+    refresh_data()
 
 
 # =============================================================================
-# HJÄLPFUNKTIONER – BERÄKNINGAR
+# HJÄLPFUNKTIONER – BERÄKNINGAR[cite: 5]
 # =============================================================================
 def safe_date(x):
     try:
@@ -281,7 +306,7 @@ def latest_value(df, col):
 
 
 def weekly_summary():
-    w = st.session_state.data["workouts"].copy()
+    w = load_table("workouts").copy()
     if w.empty:
         return 0, 0.0, 0.0
     w["_d"] = w["date"].apply(safe_date)
@@ -294,11 +319,9 @@ def weekly_summary():
 
 
 def muscle_recovery():
-    """Returnerar dict muskelgrupp -> (recovery_pct, timmar_sedan_senast)"""
-    strength = st.session_state.data["strength"].copy()
-    workouts = st.session_state.data["workouts"].copy()
+    strength = load_table("strength").copy()
+    workouts = load_table("workouts").copy()
     now = pd.Timestamp.now()
-
     last_hit = {m: None for m in MUSCLE_GROUPS}
 
     if not strength.empty:
@@ -308,7 +331,6 @@ def muscle_recovery():
             if not sub.empty:
                 last_hit[m] = sub["_d"].max()
 
-    # Löpning/promenad/cykling belastar Ben, Vader, Core (lättare)
     if not workouts.empty:
         workouts["_d"] = workouts["date"].apply(safe_date)
         cardio = workouts[workouts["type"].isin(
@@ -331,10 +353,9 @@ def muscle_recovery():
 
 
 def avg_recovery_score():
-    """Ett samlat 0-100 återhämtningsindex baserat på HRV-trend, vilopuls och sömn."""
-    rec = st.session_state.data["recovery"].copy()
-    sleep = st.session_state.data["sleep"].copy()
-    score = 70  # neutralt baseline
+    rec = load_table("recovery").copy()
+    sleep = load_table("sleep").copy()
+    score = 70
     notes = []
 
     if not rec.empty:
@@ -374,10 +395,9 @@ def recovery_badge(pct):
 
 
 # =============================================================================
-# APPLE HÄLSA-IMPORT
+# ENGÅNGSIMPORT AV HISTORIK (Apple Hälsa export.xml)[cite: 5]
 # =============================================================================
 def parse_apple_health_xml(file_obj):
-    """Läser export.xml från Apple Hälsa och fyller på sleep/recovery/body/physio/workouts."""
     sleep_records = []
     recovery_records = {}
     body_records = []
@@ -396,47 +416,42 @@ def parse_apple_health_xml(file_obj):
 
             if rtype == "HKQuantityTypeIdentifierHeartRateVariabilitySDNN" and d:
                 try:
-                    v = float(value)
-                    recovery_records.setdefault(d, {}).setdefault("hrv_list", []).append(v)
+                    recovery_records.setdefault(d, {}).setdefault("hrv_list", []).append(float(value))
                 except ValueError:
                     pass
             elif rtype == "HKQuantityTypeIdentifierRestingHeartRate" and d:
                 try:
-                    v = float(value)
-                    recovery_records.setdefault(d, {}).setdefault("rhr_list", []).append(v)
+                    recovery_records.setdefault(d, {}).setdefault("rhr_list", []).append(float(value))
                 except ValueError:
                     pass
             elif rtype == "HKQuantityTypeIdentifierBodyMass" and d:
                 try:
-                    v = float(value)
-                    body_records.append({"date": d, "weight_kg": v, "height_cm": None})
+                    body_records.append({"date": d, "weight_kg": float(value), "height_cm": None})
                 except ValueError:
                     pass
             elif rtype == "HKQuantityTypeIdentifierHeight" and d:
                 try:
                     v = float(value)
-                    unit = elem.get("unit", "cm")
-                    if unit == "m":
-                        v = v * 100
+                    if elem.get("unit", "cm") == "m":
+                        v *= 100
                     body_records.append({"date": d, "weight_kg": None, "height_cm": v})
                 except ValueError:
                     pass
             elif rtype == "HKQuantityTypeIdentifierRespiratoryRate" and d:
                 try:
-                    v = float(value)
-                    physio_records.setdefault(d, {}).setdefault("resp_list", []).append(v)
+                    physio_records.setdefault(d, {}).setdefault("resp_list", []).append(float(value))
                 except ValueError:
                     pass
             elif rtype == "HKQuantityTypeIdentifierOxygenSaturation" and d:
                 try:
-                    v = float(value) * 100 if float(value) <= 1 else float(value)
+                    v = float(value)
+                    v = v * 100 if v <= 1 else v
                     physio_records.setdefault(d, {}).setdefault("spo2_list", []).append(v)
                 except ValueError:
                     pass
             elif rtype == "HKCategoryTypeIdentifierSleepAnalysis" and start and end:
                 try:
-                    t0 = pd.to_datetime(start)
-                    t1 = pd.to_datetime(end)
+                    t0, t1 = pd.to_datetime(start), pd.to_datetime(end)
                     dur_h = (t1 - t0).total_seconds() / 3600.0
                     kind = "deep" if "Deep" in value else ("rem" if "REM" in value else
                                                             ("awake" if "Awake" in value else "asleep"))
@@ -469,18 +484,16 @@ def parse_apple_health_xml(file_obj):
 
             try:
                 dur_min = float(dur_raw) if dur_raw else None
-                if dur_unit == "sec":
+                if dur_unit == "sec" and dur_min is not None:
                     dur_min = dur_min / 60.0
             except (TypeError, ValueError):
                 dur_min = None
-
             try:
                 dist_km = float(dist_raw) if dist_raw else None
-                if dist_unit == "mi":
+                if dist_unit == "mi" and dist_km is not None:
                     dist_km = dist_km * 1.60934
             except (TypeError, ValueError):
                 dist_km = None
-
             try:
                 cal = float(energy_raw) if energy_raw else None
             except (TypeError, ValueError):
@@ -488,59 +501,51 @@ def parse_apple_health_xml(file_obj):
 
             if d:
                 workout_records.append({
-                    "id": str(uuid.uuid4())[:8],
+                    "id": f"xmlimport_{uuid.uuid4().hex[:10]}",
                     "date": d, "type": wtype, "duration_min": dur_min,
                     "distance_km": dist_km, "calories": cal,
                     "avg_hr": None, "max_hr": None, "elevation_gain": None,
-                    "route_file": None, "notes": "Importerad från Apple Hälsa",
+                    "route": None, "notes": "Importerad historik (Apple Hälsa)",
                 })
             elem.clear()
 
-    # Aggregera sömn per dag
     sleep_by_day = {}
     for r in sleep_records:
         d = r["date"]
         sleep_by_day.setdefault(d, {"asleep": 0.0, "deep": 0.0, "rem": 0.0, "awake": 0.0})
         if r["kind"] == "deep":
-            sleep_by_day[d]["deep"] += r["hours"]
-            sleep_by_day[d]["asleep"] += r["hours"]
+            sleep_by_day[d]["deep"] += r["hours"]; sleep_by_day[d]["asleep"] += r["hours"]
         elif r["kind"] == "rem":
-            sleep_by_day[d]["rem"] += r["hours"]
-            sleep_by_day[d]["asleep"] += r["hours"]
+            sleep_by_day[d]["rem"] += r["hours"]; sleep_by_day[d]["asleep"] += r["hours"]
         elif r["kind"] == "awake":
             sleep_by_day[d]["awake"] += r["hours"] * 60
         else:
             sleep_by_day[d]["asleep"] += r["hours"]
 
-    sleep_df = pd.DataFrame([
-        {"date": d, "duration_hours": round(v["asleep"], 2),
-         "quality_score": None, "deep_hours": round(v["deep"], 2),
-         "rem_hours": round(v["rem"], 2), "awake_min": round(v["awake"], 0)}
+    sleep_rows = [
+        {"date": d, "duration_hours": round(v["asleep"], 2), "quality_score": None,
+         "deep_hours": round(v["deep"], 2), "rem_hours": round(v["rem"], 2),
+         "awake_min": round(v["awake"], 0)}
         for d, v in sleep_by_day.items()
-    ])
-
-    recovery_df = pd.DataFrame([
+    ]
+    recovery_rows = [
         {"date": d,
          "hrv_ms": round(np.mean(v["hrv_list"]), 1) if "hrv_list" in v else None,
          "resting_hr": round(np.mean(v["rhr_list"]), 1) if "rhr_list" in v else None}
         for d, v in recovery_records.items()
-    ])
-
-    physio_df = pd.DataFrame([
+    ]
+    physio_rows = [
         {"date": d,
          "respiratory_rate": round(np.mean(v["resp_list"]), 1) if "resp_list" in v else None,
          "spo2": round(np.mean(v["spo2_list"]), 1) if "spo2_list" in v else None}
         for d, v in physio_records.items()
-    ])
+    ]
 
-    body_df = pd.DataFrame(body_records)
-    workouts_df = pd.DataFrame(workout_records)
-
-    return workouts_df, sleep_df, recovery_df, body_df, physio_df
+    return workout_records, sleep_rows, recovery_rows, body_records, physio_rows
 
 
 # =============================================================================
-# UI-KOMPONENTER
+# UI-KOMPONENTER[cite: 5]
 # =============================================================================
 def metric_card(col, label, value, sub=""):
     with col:
@@ -571,17 +576,17 @@ def render_muscle_bars():
 
 
 # =============================================================================
-# AI-COACH
+# AI-COACH[cite: 5]
 # =============================================================================
 def build_context_summary():
     sessions, dist, dur = weekly_summary()
     score, notes = avg_recovery_score()
     rec = muscle_recovery()
-    hrv = latest_value(st.session_state.data["recovery"], "hrv_ms")
-    rhr = latest_value(st.session_state.data["recovery"], "resting_hr")
-    sleep_h = latest_value(st.session_state.data["sleep"], "duration_hours")
-    weight = latest_value(st.session_state.data["body"], "weight_kg")
-    goals = st.session_state.data["goals"]
+    hrv = latest_value(load_table("recovery"), "hrv_ms")
+    rhr = latest_value(load_table("recovery"), "resting_hr")
+    sleep_h = latest_value(load_table("sleep"), "duration_hours")
+    weight = latest_value(load_table("body"), "weight_kg")
+    goals = load_table("goals")
     goal_txt = "Inget mål satt ännu."
     if not goals.empty:
         g = goals.iloc[-1]
@@ -590,33 +595,27 @@ def build_context_summary():
                     f"{g.get('sessions_per_week')} pass/vecka.")
 
     low_muscles = [m for m, (p, h) in rec.items() if p < 50]
-
-    summary = f"""
+    return f"""
 Återhämtningsindex: {score}/100.
 HRV senast: {hrv}. Vilopuls senast: {rhr}. Sömn senaste natten: {sleep_h} h.
 Veckans träning: {sessions} pass, {dist} km, {dur} min totalt.
 Kroppsvikt senast: {weight} kg.
 Muskler med låg återhämtning (<50%): {', '.join(low_muscles) if low_muscles else 'inga'}.
 Mål: {goal_txt}
-"""
-    return summary.strip()
+""".strip()
 
 
 def try_parse_strength_log(msg: str):
-    """Försöker tolka ett meddelande som 'lägg till <övning> <muskelgrupp> 3x8 70kg'."""
     lower = msg.lower()
     if not any(k in lower for k in ["lägg till", "logga"]):
         return None
-
     muscle_found = None
     for m in MUSCLE_GROUPS:
         if m.lower() in lower:
             muscle_found = m
             break
-
     sets_reps = re.search(r"(\d+)\s*x\s*(\d+)", lower)
     weight_match = re.search(r"(\d+(?:[.,]\d+)?)\s*kg", lower)
-
     if not (sets_reps or weight_match or muscle_found):
         return None
 
@@ -627,17 +626,16 @@ def try_parse_strength_log(msg: str):
         exercise_name = exercise_name.replace(muscle_found.lower(), "")
     exercise_name = exercise_name.strip(" ,.-").capitalize() or "Övning"
 
-    sets = int(sets_reps.group(1)) if sets_reps else None
-    reps = int(sets_reps.group(2)) if sets_reps else None
-    weight = float(weight_match.group(1).replace(",", ".")) if weight_match else None
-
     return {
-        "id": str(uuid.uuid4())[:8],
+        "id": f"chat_{uuid.uuid4().hex[:10]}",
         "date": datetime.now().strftime("%Y-%m-%d"),
         "muscle_group": muscle_found or "Övrigt",
         "exercise": exercise_name,
         "equipment": "",
-        "sets": sets, "reps": reps, "weight_kg": weight, "rpe": None,
+        "sets": int(sets_reps.group(1)) if sets_reps else None,
+        "reps": int(sets_reps.group(2)) if sets_reps else None,
+        "weight_kg": float(weight_match.group(1).replace(",", ".")) if weight_match else None,
+        "rpe": None,
         "notes": "Tillagd via AI-chatten",
     }
 
@@ -662,9 +660,9 @@ def rule_based_reply(user_msg: str, context: str) -> str:
         return txt
 
     if any(k in m for k in ["sömn", "sova"]):
-        sleep_h = latest_value(st.session_state.data["sleep"], "duration_hours")
+        sleep_h = latest_value(load_table("sleep"), "duration_hours")
         if sleep_h is None:
-            return "Jag har ingen sömndata ännu – importera din Apple Hälsa-export så kan jag ge bättre råd."
+            return "Jag har ingen sömndata ännu – kontrollera att Health Auto Export synkar mot webhooken."
         if sleep_h < 6.5:
             return (f"Du sov {sleep_h:.1f} h senaste natten, vilket är lite lågt. "
                      "Prioritera 7–9 h de kommande nätterna och håll intensiteten nere idag.")
@@ -672,19 +670,15 @@ def rule_based_reply(user_msg: str, context: str) -> str:
 
     if any(k in m for k in ["schema", "vecka", "plan"]):
         return ("Kolla fliken 'Mål & Schema' där jag genererar ett dynamiskt veckoschema baserat på ditt lopp, "
-                "sömn och återhämtning. Justera målen där så uppdateras schemat automatiskt.")
+                "sömn och återhämtning.")
 
     if any(k in m for k in ["vikt", "väger"]):
-        w = latest_value(st.session_state.data["body"], "weight_kg")
-        if w:
-            return f"Din senast loggade vikt är {w} kg."
-        return "Ingen viktdata är importerad ännu."
+        w = latest_value(load_table("body"), "weight_kg")
+        return f"Din senast loggade vikt är {w} kg." if w else "Ingen viktdata synkad ännu."
 
     if any(k in m for k in ["hrv"]):
-        h = latest_value(st.session_state.data["recovery"], "hrv_ms")
-        if h:
-            return f"Din senaste HRV är {h} ms. {notes[0] if notes else ''}"
-        return "Ingen HRV-data importerad ännu."
+        h = latest_value(load_table("recovery"), "hrv_ms")
+        return f"Din senaste HRV är {h} ms. {notes[0] if notes else ''}" if h else "Ingen HRV-data synkad ännu."
 
     return (f"Den här veckan har du kört {sessions} pass ({dist} km, {dur} min totalt) "
             f"och ditt återhämtningsindex är {score}/100. Fråga mig gärna om sömn, HRV, "
@@ -694,16 +688,15 @@ def rule_based_reply(user_msg: str, context: str) -> str:
 def get_ai_response(user_msg: str) -> str:
     context = build_context_summary()
 
-    # Försök logga styrkepass direkt via chatten
     parsed = try_parse_strength_log(user_msg)
     if parsed:
-        add_row("strength", parsed)
+        db_insert("strength", parsed)
         weight_txt = f"@ {parsed['weight_kg']} kg" if parsed['weight_kg'] else ""
         return (f"✅ Loggat: **{parsed['exercise']}** ({parsed['muscle_group']}) – "
                 f"{parsed['sets'] or '?'}x{parsed['reps'] or '?'} {weight_txt}. "
-                "Muskelåterhämtningen är uppdaterad!")
+                "Sparat permanent i databasen och muskelåterhämtningen är uppdaterad!")
 
-    api_key = st.session_state.openai_key or os.environ.get("OPENAI_API_KEY", "")
+    api_key = st.session_state.get("openai_key", "")
     if api_key and OPENAI_LIB_OK:
         try:
             client = OpenAI(api_key=api_key)
@@ -714,27 +707,24 @@ def get_ai_response(user_msg: str) -> str:
             )
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_msg},
-                ],
+                messages=[{"role": "system", "content": system_prompt},
+                          {"role": "user", "content": user_msg}],
                 max_tokens=400,
             )
             return resp.choices[0].message.content
         except Exception as e:
-            return f"(Kunde inte nå OpenAI, faller tillbaka på inbyggd logik: {e})\n\n" + rule_based_reply(user_msg, context)
+            return f"(Kunde inte nå OpenAI: {e})\n\n" + rule_based_reply(user_msg, context)
 
     return rule_based_reply(user_msg, context)
 
 
 # =============================================================================
-# SCHEMA-GENERERING
+# SCHEMA-GENERERING[cite: 5]
 # =============================================================================
 def generate_schedule(goal_row):
     score, _ = avg_recovery_score()
     sessions_per_week = int(goal_row.get("sessions_per_week", 4) or 4)
     race_date = goal_row.get("race_date")
-    race_distance = goal_row.get("race_distance_km", 10)
 
     try:
         weeks_left = max(1, (pd.to_datetime(race_date) - pd.Timestamp.now()).days // 7)
@@ -749,10 +739,8 @@ def generate_schedule(goal_row):
         intensity_note = "Lågt återhämtningsläge – prioritera lätta pass och rörlighet denna vecka."
 
     days = ["Måndag", "Tisdag", "Onsdag", "Torsdag", "Fredag", "Lördag", "Söndag"]
-    pass_types = []
     base_cycle = ["Lugn löpning", "Styrka – underkropp", "Intervaller",
                   "Styrka – överkropp", "Vila/rörlighet", "Långpass", "Vila"]
-
     if score < 50:
         base_cycle = ["Lätt promenad", "Lätt styrka/mobility", "Vila",
                       "Lugn löpning", "Vila", "Lätt löpning", "Vila"]
@@ -767,37 +755,67 @@ def generate_schedule(goal_row):
             schedule.append((day, base_cycle[idx]))
         else:
             schedule.append((day, "Vila"))
-
     return schedule, weeks_left, intensity_note
 
 
 # =============================================================================
-# HEADER
+# SESSION STATE[cite: 5]
+# =============================================================================
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [
+        {"role": "assistant", "content":
+         "Hej! Jag är din AI-tränarcoach 💪. Din Apple Hälsa-data synkas nu automatiskt i "
+         "bakgrunden. Fråga mig om återhämtning, sömn, schema – eller säg t.ex. "
+         "*'lägg till bänkpress bröst 3x8 70kg'* för att logga ett styrkepass direkt här."}
+    ]
+if "selected_workout" not in st.session_state:
+    st.session_state.selected_workout = None
+if "openai_key" not in st.session_state:
+    st.session_state.openai_key = ""
+
+
+# =============================================================================
+# HEADER + SIDOPANEL[cite: 5]
 # =============================================================================
 st.markdown('<div class="app-title">🏃‍♂️ Träning & Hälsa</div>', unsafe_allow_html=True)
-st.markdown('<div class="app-sub">Din personliga coach – drivs av din Apple Hälsa-data</div>', unsafe_allow_html=True)
+st.markdown('<div class="app-sub">Live från molnet – drivs av din Apple Hälsa-data</div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.markdown("### ⚙️ Inställningar")
+    if supabase is not None:
+        st.markdown('<span class="conn-ok">🟢 Ansluten till Supabase</span>', unsafe_allow_html=True)
+    else:
+        st.markdown('<span class="conn-bad">🔴 Ingen databaskoppling</span>', unsafe_allow_html=True)
+        st.caption("Lägg in SUPABASE_URL och SUPABASE_KEY i App settings -> Secrets.")
+        if "_last_db_error" in st.session_state:
+            st.caption(f"Fel: {st.session_state['_last_db_error']}")
+
     st.session_state.openai_key = st.text_input(
         "OpenAI API-nyckel (valfritt, för smartare AI-chatt)",
         value=st.session_state.openai_key, type="password",
         help="Utan nyckel används en inbyggd regelbaserad coach istället."
     )
-    st.caption("Nyckeln sparas endast i din session, inte i filerna.")
 
-tabs = st.tabs(["🏠 Hem", "📥 Importera", "🗂️ Arkiv", "🎯 Mål & Schema", "💪 Styrka"])
+    if AUTOREFRESH_OK:
+        auto_on = st.toggle("Auto-uppdatera var 2:a minut", value=False)
+        if auto_on:
+            st_autorefresh(interval=120_000, key="auto_refresh_health")
+    if st.button("🔄 Uppdatera data nu"):
+        refresh_data()
+        st.rerun()
+
+tabs = st.tabs(["🏠 Hem", "📥 Historik", "🗂️ Arkiv", "🎯 Mål & Schema", "💪 Styrka"])
 
 
 # =============================================================================
-# TAB 1 – HEM
+# TAB 1 – HEM[cite: 5]
 # =============================================================================
 with tabs[0]:
     score, notes = avg_recovery_score()
     sessions, dist, dur = weekly_summary()
-    hrv = latest_value(st.session_state.data["recovery"], "hrv_ms")
-    rhr = latest_value(st.session_state.data["recovery"], "resting_hr")
-    sleep_h = latest_value(st.session_state.data["sleep"], "duration_hours")
+    hrv = latest_value(load_table("recovery"), "hrv_ms")
+    rhr = latest_value(load_table("recovery"), "resting_hr")
+    sleep_h = latest_value(load_table("sleep"), "duration_hours")
 
     c1, c2 = st.columns(2)
     metric_card(c1, "Återhämtning", f"{score}", recovery_badge(score))
@@ -836,46 +854,47 @@ with tabs[0]:
 
 
 # =============================================================================
-# TAB 2 – IMPORTERA
+# TAB 2 – HISTORIK[cite: 5]
 # =============================================================================
 with tabs[1]:
-    st.markdown('<div class="section-title">📥 Importera Apple Hälsa-data</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">📥 Importera gammal historik</div>', unsafe_allow_html=True)
     st.markdown("""
     <div class="glass-card">
-    1. Öppna appen <b>Hälsa</b> på din iPhone → tryck på din profilbild → <b>Exportera all hälsodata</b>.<br>
-    2. Packa upp zip-filen på din dator – leta upp filen <b>export.xml</b>.<br>
-    3. Ladda upp <b>export.xml</b> nedan (kan ta en stund för stora filer).
+    Din nya träning, sömn, HRV och vikt synkas <b>automatiskt</b> i bakgrunden via
+    Health Auto Export – du behöver inte göra något mer här för framtida data.<br><br>
+    Använd fliken nedan bara <b>en gång</b> om du vill fylla på med gammal historik
+    som ligger längre bak i tiden än du börjat auto-synka.
     </div>
     """, unsafe_allow_html=True)
 
-    xml_file = st.file_uploader("Ladda upp export.xml", type=["xml"])
+    xml_file = st.file_uploader("Ladda upp gammal export.xml från Apple Hälsa", type=["xml"])
     if xml_file is not None:
-        with st.spinner("Läser in din hälsodata... detta kan ta en stund för stora filer."):
+        with st.spinner("Läser in och sparar historik i molnet..."):
             try:
-                w_df, s_df, r_df, b_df, p_df = parse_apple_health_xml(xml_file)
+                w_rows, s_rows, r_rows, b_rows, p_rows = parse_apple_health_xml(xml_file)
                 added = 0
-                if not w_df.empty:
-                    added += upsert_bulk("workouts", w_df, ["date", "type", "duration_min"])
-                if not s_df.empty:
-                    added += upsert_bulk("sleep", s_df, ["date"])
-                if not r_df.empty:
-                    added += upsert_bulk("recovery", r_df, ["date"])
-                if not b_df.empty:
-                    added += upsert_bulk("body", b_df, ["date", "weight_kg", "height_cm"])
-                if not p_df.empty:
-                    added += upsert_bulk("physio", p_df, ["date"])
-                st.success(f"Klart! {added} nya rader importerade från Apple Hälsa.")
+                if w_rows:
+                    added += db_upsert("workouts", w_rows, "id")
+                if s_rows:
+                    added += db_upsert("sleep", s_rows, "date")
+                if r_rows:
+                    added += db_upsert("recovery", r_rows, "date")
+                if b_rows:
+                    added += db_upsert("body", b_rows, "date")
+                if p_rows:
+                    added += db_upsert("physio", p_rows, "date")
+                st.success(f"Klart! {added} rader sparades permanent i din databas.")
             except Exception as e:
                 st.error(f"Kunde inte tolka filen: {e}")
 
-    st.markdown('<div class="section-title">📄 Generisk import (CSV)</div>', unsafe_allow_html=True)
-    st.caption("Använd detta för äldre historik eller export från andra appar. "
-               "CSV-filen bör matcha kolumnerna nedan (extra kolumner ignoreras).")
+    st.markdown('<div class="section-title">📄 Generisk CSV-import</div>', unsafe_allow_html=True)
     target = st.selectbox("Vilken datatyp vill du importera?",
                            ["workouts", "sleep", "recovery", "body", "physio", "strength"],
                            format_func=lambda x: {
-                               "workouts": "Träningspass", "sleep": "Sömn", "recovery": "Återhämtning (HRV/vilopuls)",
-                               "body": "Kroppsmått", "physio": "Fysiologi (andning/syre)", "strength": "Styrkelogg"
+                               "workouts": "Träningspass", "sleep": "Sömn",
+                               "recovery": "Återhämtning (HRV/vilopuls)",
+                               "body": "Kroppsmått", "physio": "Fysiologi (andning/syre)",
+                               "strength": "Styrkelogg"
                            }[x])
     st.code(", ".join(SCHEMAS[target]), language="text")
     csv_file = st.file_uploader(f"Ladda upp CSV för {target}", type=["csv"], key=f"csv_{target}")
@@ -885,46 +904,51 @@ with tabs[1]:
             for col in SCHEMAS[target]:
                 if col not in df_new.columns:
                     df_new[col] = np.nan
-            if "id" in SCHEMAS[target] and "id" not in df_new.columns:
-                df_new["id"] = [str(uuid.uuid4())[:8] for _ in range(len(df_new))]
-            dedup = ["id"] if "id" in SCHEMAS[target] else ["date"]
-            added = upsert_bulk(target, df_new[SCHEMAS[target]], dedup)
-            st.success(f"{added} nya rader importerade till {target}.")
+            if "id" in SCHEMAS[target]:
+                df_new["id"] = df_new["id"].apply(
+                    lambda x: x if pd.notna(x) and str(x).strip() else f"csv_{uuid.uuid4().hex[:10]}")
+            conflict_col = "id" if "id" in SCHEMAS[target] else "date"
+            rows = df_new[SCHEMAS[target]].to_dict(orient="records")
+            added = db_upsert(target, rows, conflict_col)
+            st.success(f"{added} rader sparades permanent i {target}.")
         except Exception as e:
             st.error(f"Fel vid import: {e}")
 
-    st.markdown('<div class="section-title">🗺️ Ladda upp GPS-rutt (GPX)</div>', unsafe_allow_html=True)
-    st.caption("Apple Hälsa-export innehåller GPX-filer i mappen 'workout-routes'. "
-               "Koppla en rutt till ett träningspass här.")
-    w_df_now = st.session_state.data["workouts"]
+    st.markdown('<div class="section-title">🗺️ Koppla GPS-rutt manuellt (GPX)</div>', unsafe_allow_html=True)
+    st.caption("Vanligtvis kommer rutten automatiskt med via webhooken. Detta är bara ett manuellt komplement.")
+    w_df_now = load_table("workouts")
     if not w_df_now.empty:
         options = w_df_now.apply(lambda r: f"{r['date']} – {r['type']} ({r['id']})", axis=1).tolist()
         choice = st.selectbox("Välj träningspass", options) if options else None
         gpx_file = st.file_uploader("Ladda upp .gpx-fil", type=["gpx"])
-        if gpx_file is not None and choice:
+        if gpx_file is not None and choice and GPXPY_OK:
             wid = choice.split("(")[-1].replace(")", "")
-            fname = f"{wid}.gpx"
-            fpath = os.path.join(ROUTES_DIR, fname)
-            with open(fpath, "wb") as f:
-                f.write(gpx_file.getbuffer())
-            df = st.session_state.data["workouts"]
-            df.loc[df["id"] == wid, "route_file"] = fpath
-            st.session_state.data["workouts"] = df
-            save_df("workouts", df)
-            st.success("Rutt kopplad till träningspasset! Se den i Arkiv-fliken.")
+            try:
+                gpx = gpxpy.parse(gpx_file)
+                points = [{"lat": p.latitude, "lon": p.longitude}
+                          for track in gpx.tracks for seg in track.segments for p in seg.points]
+                if points:
+                    db_update_field("workouts", "id", wid, "route", points)
+                    st.success("Rutt sparad permanent i databasen! Se den i Arkiv-fliken.")
+                else:
+                    st.warning("Hittade inga punkter i GPX-filen.")
+            except Exception as e:
+                st.error(f"Kunde inte läsa GPX-filen: {e}")
+        elif gpx_file is not None and not GPXPY_OK:
+            st.warning("Installera paketet 'gpxpy' (finns i requirements.txt) för GPX-stöd.")
     else:
-        st.info("Inga träningspass importerade ännu.")
+        st.info("Inga träningspass i databasen ännu.")
 
 
 # =============================================================================
-# TAB 3 – ARKIV
+# TAB 3 – ARKIV[cite: 5]
 # =============================================================================
 with tabs[2]:
     st.markdown('<div class="section-title">🗂️ Träningsarkiv</div>', unsafe_allow_html=True)
-    w = st.session_state.data["workouts"].copy()
+    w = load_table("workouts").copy()
 
     if w.empty:
-        st.info("Inga träningspass i arkivet ännu. Importera data i fliken 'Importera'.")
+        st.info("Inga träningspass i arkivet ännu. Vänta på automatisk synk eller importera historik.")
     else:
         w["_d"] = w["date"].apply(safe_date)
         w = w.sort_values("_d", ascending=False)
@@ -946,19 +970,18 @@ with tabs[2]:
 
         for _, row in filtered.iterrows():
             wid = row["id"]
-            with st.container():
-                st.markdown(f"""
-                <div class="workout-row">
-                    <div class="wr-title">{row['type']} – {row['date']}</div>
-                    <div class="wr-sub">
-                        {f"{row['distance_km']:.1f} km" if pd.notna(row['distance_km']) else ""}
-                        {f" · {row['duration_min']:.0f} min" if pd.notna(row['duration_min']) else ""}
-                        {f" · {row['calories']:.0f} kcal" if pd.notna(row['calories']) else ""}
-                    </div>
+            st.markdown(f"""
+            <div class="workout-row">
+                <div class="wr-title">{row['type']} – {row['date']}</div>
+                <div class="wr-sub">
+                    {f"{row['distance_km']:.1f} km" if pd.notna(row['distance_km']) else ""}
+                    {f" · {row['duration_min']:.0f} min" if pd.notna(row['duration_min']) else ""}
+                    {f" · {row['calories']:.0f} kcal" if pd.notna(row['calories']) else ""}
                 </div>
-                """, unsafe_allow_html=True)
-                if st.button("Visa detaljer", key=f"btn_{wid}"):
-                    st.session_state.selected_workout = wid
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("Visa detaljer", key=f"btn_{wid}"):
+                st.session_state.selected_workout = wid
 
         if st.session_state.selected_workout:
             sel = w[w["id"] == st.session_state.selected_workout]
@@ -973,19 +996,15 @@ with tabs[2]:
                 if pd.notna(row.get("notes")):
                     st.caption(row["notes"])
 
-                route_file = row.get("route_file")
-                if pd.notna(route_file) and route_file and os.path.exists(str(route_file)):
-                    if FOLIUM_OK and GPXPY_OK:
+                route = row.get("route")
+                if isinstance(route, list) and len(route) > 0:
+                    if FOLIUM_OK:
                         try:
-                            with open(route_file, "r") as f:
-                                gpx = gpxpy.parse(f)
-                            points = []
-                            for track in gpx.tracks:
-                                for seg in track.segments:
-                                    for p in seg.points:
-                                        points.append((p.latitude, p.longitude))
+                            points = [(p.get("lat"), p.get("lon")) for p in route
+                                      if p.get("lat") is not None and p.get("lon") is not None]
                             if points:
-                                m = folium.Map(location=points[len(points)//2], zoom_start=14, tiles="CartoDB dark_matter")
+                                m = folium.Map(location=points[len(points)//2], zoom_start=14,
+                                                tiles="CartoDB dark_matter")
                                 folium.PolyLine(points, color="#FC5200", weight=5).add_to(m)
                                 folium.Marker(points[0], tooltip="Start",
                                               icon=folium.Icon(color="green")).add_to(m)
@@ -993,13 +1012,13 @@ with tabs[2]:
                                               icon=folium.Icon(color="red")).add_to(m)
                                 st_folium(m, height=340, width=None)
                             else:
-                                st.info("GPX-filen innehöll inga rutt-punkter.")
+                                st.info("Ruttdatan innehöll inga giltiga punkter.")
                         except Exception as e:
                             st.warning(f"Kunde inte rendera kartan: {e}")
                     else:
-                        st.warning("Installera 'folium', 'streamlit-folium' och 'gpxpy' för kartvisning.")
+                        st.warning("Installera 'folium' och 'streamlit-folium' för kartvisning.")
                 else:
-                    st.caption("📍 Ingen GPS-rutt kopplad till detta pass. Ladda upp GPX i fliken Importera.")
+                    st.caption("📍 Ingen GPS-rutt kopplad till detta pass ännu.")
 
                 if st.button("Stäng detaljer"):
                     st.session_state.selected_workout = None
@@ -1007,7 +1026,7 @@ with tabs[2]:
 
 
 # =============================================================================
-# TAB 4 – MÅL & SCHEMA
+# TAB 4 – MÅL & SCHEMA[cite: 5]
 # =============================================================================
 with tabs[3]:
     st.markdown('<div class="section-title">🎯 Sätt ditt mål</div>', unsafe_allow_html=True)
@@ -1024,17 +1043,15 @@ with tabs[3]:
         st.markdown('</div>', unsafe_allow_html=True)
 
         if submitted and race_name:
-            goal_row = {
+            db_insert("goals", {
+                "id": str(uuid.uuid4().int % 2_000_000_000),
                 "race_name": race_name, "race_date": str(race_date),
                 "race_distance_km": race_distance, "target_time": target_time,
                 "sessions_per_week": sessions_per_week,
-            }
-            df = pd.DataFrame([goal_row])
-            st.session_state.data["goals"] = df  # ett aktivt mål i taget
-            save_df("goals", df)
-            st.success("Mål sparat! Ditt schema uppdateras nedan.")
+            })
+            st.success("Mål sparat permanent i databasen! Ditt schema uppdateras nedan.")
 
-    goals = st.session_state.data["goals"]
+    goals = load_table("goals")
     if not goals.empty:
         g = goals.iloc[-1].to_dict()
         st.markdown('<div class="section-title">📆 Ditt dynamiska veckoschema</div>', unsafe_allow_html=True)
@@ -1056,13 +1073,13 @@ with tabs[3]:
             """, unsafe_allow_html=True)
 
         st.caption("Schemat räknas om automatiskt utifrån din senaste sömn, HRV och muskelåterhämtning "
-                   "varje gång du öppnar appen eller sparar nya mätvärden.")
+                   "eftersom det läses live från databasen varje gång du öppnar appen.")
     else:
         st.info("Sätt ett mål ovan så genererar AI-coachen ett schema åt dig.")
 
 
 # =============================================================================
-# TAB 5 – STYRKA
+# TAB 5 – STYRKA[cite: 5]
 # =============================================================================
 with tabs[4]:
     st.markdown('<div class="section-title">💪 Logga styrketräning</div>', unsafe_allow_html=True)
@@ -1079,17 +1096,17 @@ with tabs[4]:
         notes = st.text_input("Anteckning (valfritt)")
         if st.button("➕ Logga pass"):
             final_exercise = custom_exercise.strip() if custom_exercise.strip() else exercise
-            add_row("strength", {
-                "id": str(uuid.uuid4())[:8], "date": datetime.now().strftime("%Y-%m-%d"),
+            db_insert("strength", {
+                "id": f"manual_{uuid.uuid4().hex[:10]}", "date": datetime.now().strftime("%Y-%m-%d"),
                 "muscle_group": muscle, "exercise": final_exercise, "equipment": "",
                 "sets": sets, "reps": reps, "weight_kg": weight, "rpe": rpe, "notes": notes,
             })
-            st.success(f"Loggat {final_exercise} – {sets}x{reps} @ {weight} kg!")
+            st.success(f"Loggat {final_exercise} – {sets}x{reps} @ {weight} kg! Sparat permanent i molnet.")
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">📖 Styrkehistorik</div>', unsafe_allow_html=True)
-    s = st.session_state.data["strength"].copy()
+    s = load_table("strength").copy()
     if s.empty:
         st.info("Inga styrkepass loggade ännu.")
     else:
