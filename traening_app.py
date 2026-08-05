@@ -26,11 +26,11 @@ def check_password():
 if not check_password():
     st.stop()
 
-# Anslut till Supabase
+# Anslut till Supabase och rensa bort eventuella dolda/osynliga tecken
 @st.cache_resource
 def init_connection():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
+    url = str(st.secrets["SUPABASE_URL"]).strip().encode("ascii", "ignore").decode("ascii")
+    key = str(st.secrets["SUPABASE_KEY"]).strip().encode("ascii", "ignore").decode("ascii")
     return create_client(url, key)
 
 supabase = init_connection()
