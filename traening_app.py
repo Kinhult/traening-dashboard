@@ -123,7 +123,6 @@ with tab1:
         start_of_week = today - timedelta(days=today.weekday())
         current_week_df = workouts_df[workouts_df["date"] >= pd.Timestamp(start_of_week.date())]
         
-        # Snygga Strava-liknande metrik-kort
         col1, col2, col3, col4 = st.columns(4)
         total_dist = current_week_df["distance_km"].sum() if "distance_km" in current_week_df.columns and current_week_df["distance_km"].notnull().any() else 10.13
         total_time_min = current_week_df["duration_min"].sum() if "duration_min" in current_week_df.columns else 47.8
@@ -135,7 +134,6 @@ with tab1:
         
         st.markdown("---")
         
-        # Sömn & Sömnpoäng (Apple Health-stil)
         st.subheader("💤 Nattens Sömn & Sömnpoäng")
         if not sleep_df.empty:
             latest_sleep = sleep_df.sort_values(by="date", ascending=False).iloc[0]
@@ -191,7 +189,6 @@ with tab2:
         
         st.markdown(f"### 🌙 Löpning på natten – {selected_run['date'].strftime('%Y-%m-%d')}")
         
-        # Strava Premium Metriker
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Distans", "10,13 km")
         col2.metric("Tid i rörelse", "47:48")
@@ -206,7 +203,6 @@ with tab2:
         
         st.markdown("---")
         
-        # Karta & Segmentanalys
         st.subheader("🗺️ GPS-karta & Segmentanalys (Ljungby)")
         col_map, col_info = st.columns([2, 1])
         with col_map:
@@ -353,4 +349,4 @@ Svara personligt, coachande och direkt på användarens frågor om sömn, träni
                 with st.chat_message("assistant"):
                     st.markdown(answer)
         else:
-			st.info("Lägg till din `GROQ_API_KEY` under Streamlit Cloud Secrets.")
+            st.info("Lägg till din `GROQ_API_KEY` under Streamlit Cloud Secrets.")
