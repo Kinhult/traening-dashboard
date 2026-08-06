@@ -126,7 +126,6 @@ with tab1:
         if not sleep_df.empty:
             latest_sleep = sleep_df.sort_values(by="date", ascending=False).iloc[0]
             sleep_hours = latest_sleep.get("duration_hours", 0)
-            # Beräkna en enkel sömnpoäng baserat på mål om 8 timmar
             sleep_score = min(100, int((sleep_hours / 8.0) * 100)) if sleep_hours else 0
             
             sc1, sc2, sc3 = st.columns(3)
@@ -153,11 +152,11 @@ with tab1:
         st.info("Inga träningspass inlagda i databasen ännu.")
 
 # ==========================================
-# FLIK 2: LÖPNING (STRAVA-STIL)
+# FLIK 2: LÖPNING (STRAVA-STIL MED MENY & DJUPDYKNING)
 # ==========================================
 with tab2:
-    st.title("🏃‍♂️ Löpning & Uthållighet")
-    st.markdown("Detaljerad löpdata inspirerad av Strava Premium med kartor, pulszoner och VO2 Max-utveckling.")
+    st.title("🏃‍♂️ Löpning & Strava-analys")
+    st.markdown("Välj ett tidigare löppass nedan för att se GPS-karta, deltider, puls, höjd och Strava-statistik.")
     
     st.subheader("🎯 Aktiva Löpmål")
     running_goals = [g for g in st.session_state.goals if g["category"] == "Löpning"]
@@ -173,32 +172,92 @@ with tab2:
     running_df = workouts_df[workouts_df["type"].str.contains("Löp|Utomhus Kör", case=False, na=False)] if not workouts_df.empty else pd.DataFrame()
     
     if not running_df.empty:
-        st.subheader("🗺️ Senaste Löppasset & Karta")
-        run_options = running_df["date"].dt.strftime('%Y-%m-%d %H:%M').tolist()
-        selected_run = st.selectbox("Välj löppass att analysera:", run_options)
+        # Sortera senaste först och skapa en tydlig meny
+        running_df = running_df.sort_values(by="date", ascending=False)
+        run_options = running_df.apply(lambda row: f"{row['date'].strftime('%Y-%m-%d %H:%M')} – {row.get('type', 'Löpning')} ({row.get('distance_km', 0):.2f} km)", axis=1).tolist()
         
-        col_map, col_stats = st.columns([2, 1])
+        selected_run_str = st.selectbox("📂 Välj löppass att analysera:", run_options)
+        selected_idx = run_options.index(selected_run_str)
+        selected_run = running_df.iloc[selected_idx]
+        
+        st.markdown(f"### 🌙 Passdetaljer: {selected_run['date'].strftime('%Y-%m-%d %H:%M')}")
+        
+        # Huvudmått (Strava-stil)
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Distans", f"{selected_run.get('distance_km', 10.13):.2f} km")
+        col2.metric("Tid i rörelse", "47:48")
+        col3.metric("Genomsnittligt tempo", "4:43 /km")
+        col4.metric("Höjdökning", "53 m")
+        
+        col5, col6, col7, col8 = st.columns(4)
+        col5.metric("Kalorier", "703 kcal")
+        col6.metric("Genomsnittlig puls", "164 slag/min")
+        col7.metric("Maxpuls", "179 slag/min")
+        col8.metric("Snitteffekt", "276 W")
+        
+        st.markdown("---")
+        
+        # Karta och Segment / Utmärkelser
+        st.subheader("🗺️ GPS-karta över rundan (Ljungby)")
+        col_map, col_info = st.columns([2, 1])
         with col_map:
-            m = folium.Map(location=[57.7089, 11.9746], zoom_start=13)
-            folium.Marker([57.7089, 11.9746], tooltip="Start / Mål", icon=folium.Icon(color="green", icon="play")).add_to(m)
-            st_folium(m, height=350, use_container_width=True)
+            # Folium karta centrerad på Ljungby med mörkt tema
+            m = folium.Map(location=[56.8333, 13.9333], zoom_start=13, tiles="CartoDB dark_matter")
+            route_coords = [
+                [56.8333, 13.9333], [56.8360, 13.9380], [56.8400, 13.9450],
+                [56.8420, 13.9350], [56.8380, 13.9250], [56.8300, 13.9200],
+                [56.8250, 13.9280], [56.8300, 13.9333]
+            ]
+            folium.PolyLine(route_coords, color="#fc4c02", weight=4, opacity=0.85).add_to(m)
+            folium.Marker([56.8333, 13.9333], tooltip="Start / Mål", icon=folium.Icon(color="orange", icon="play")).add_to(m)
+            st_folium(m, height=400, use_container_width=True)
             
-        with col_stats:
-            st.markdown("#### Passdetaljer")
-            st.metric("Snittpuls", "154 bpm")
-            st.metric("Höjdstigning", "+124 m")
-            st.metric("Uppskattat VO2 Max", "52 ml/kg/min")
-            st.metric("Stegfrekvens", "174 spm")
+        with col_info:
+            st.markdown("#### Utmärkelser & Segment")
+            st.success("🥉 Dina tredje snabbaste 10 km! (-20s)")
+            st.info("🏆 4:e bästa tiden på Gångväg Stensberg")
+            st.info("🏆 5:e bästa tiden Garvaren till Stensberg")
+            st.metric("Total tid", "48:01")
+            st.metric("Snabbaste km", "4:27 /km")
             
-        st.markdown("### 📈 Puls & Höjdprofil under loppet")
-        chart_data = pd.DataFrame({
-            "Kilometer": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-            "Puls (bpm)": [140, 148, 152, 155, 158, 160, 162, 165, 170, 175],
-            "Höjd (m)": [10, 15, 25, 20, 35, 40, 30, 20, 15, 10]
+        st.markdown("---")
+        st.subheader("📊 Deltider per kilometer")
+        splits_data = pd.DataFrame({
+            "Km": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, "0,1"],
+            "Tempo": ["5:10", "4:48", "4:36", "4:30", "4:27", "4:40", "4:40", "4:35", "4:51", "4:52", "4:59"],
+            "Höjdändring (m)": [-17, 9, 6, -1, -10, 0, -7, 0, 10, 1, 2],
+            "Puls (slag/min)": [141, 157, 162, 166, 167, 168, 167, 173, 172, 171, 172]
         })
-        st.line_chart(chart_data.set_index("Kilometer"))
+        st.dataframe(splits_data, use_container_width=True)
+        
+        st.markdown("---")
+        st.subheader("📈 Grafer & Analys (Tempo, Puls, Höjd & Effekt)")
+        
+        chart_km = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            st.markdown("**Puls (slag/min)**")
+            hr_df = pd.DataFrame({"Puls": [145, 155, 162, 168, 166, 152, 160, 170, 173, 175]}, index=chart_km)
+            st.line_chart(hr_df)
+            
+        with col_g2:
+            st.markdown("**Höjdprofil (meter)**")
+            elev_df = pd.DataFrame({"Höjd (m)": [155, 142, 148, 158, 153, 140, 143, 152, 150, 154]}, index=chart_km)
+            st.area_chart(elev_df)
+            
+        col_g3, col_g4 = st.columns(2)
+        with col_g3:
+            st.markdown("**Effekt (W)**")
+            power_df = pd.DataFrame({"Effekt (W)": [280, 295, 310, 340, 320, 290, 300, 315, 325, 330]}, index=chart_km)
+            st.area_chart(power_df)
+            
+        with col_g4:
+            st.markdown("**Tempo (/km)**")
+            pace_df = pd.DataFrame({"Tempo-index": [5.1, 4.8, 4.6, 4.5, 4.4, 4.7, 4.7, 4.6, 4.9, 4.9]}, index=chart_km)
+            st.line_chart(pace_df)
     else:
-        st.info("Inga registrerade löppass hittades.")
+        st.info("Inga registrerade löppass hittades i databasen.")
 
 # ==========================================
 # FLIK 3: STYRKETRÄNING
@@ -281,7 +340,6 @@ with tab4:
                 api_key=st.secrets["GROQ_API_KEY"]
             )
             
-            # Förbered kontext från databasen för AI-coachen
             sleep_summary = "Ingen sömnsdata tillgänglig i databasen."
             if not sleep_df.empty:
                 latest_sleep = sleep_df.sort_values(by="date", ascending=False).iloc[0]
