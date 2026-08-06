@@ -121,6 +121,23 @@ with tab1:
         
         st.markdown("---")
         
+        # Sömnsammanfattning & Sömnpoäng (Apple Health-stil)
+        st.subheader("💤 Sömn & Nattens återhämtning")
+        if not sleep_df.empty:
+            latest_sleep = sleep_df.sort_values(by="date", ascending=False).iloc[0]
+            sleep_hours = latest_sleep.get("duration_hours", 0)
+            # Beräkna en enkel sömnpoäng baserat på mål om 8 timmar
+            sleep_score = min(100, int((sleep_hours / 8.0) * 100)) if sleep_hours else 0
+            
+            sc1, sc2, sc3 = st.columns(3)
+            sc1.metric("Sömntid i natt", f"{sleep_hours:.1f} timmar")
+            sc2.metric("Sömnpoäng", f"{sleep_score} / 100")
+            sc3.metric("Status", "Utmärkt 🟢" if sleep_score >= 85 else "God 🟡" if sleep_score >= 65 else "Behöver vila 🔴")
+        else:
+            st.info("Ingen sömndata registrerad ännu.")
+            
+        st.markdown("---")
+        
         st.subheader("📊 Jämförelse med tidigare veckor (Tid i minuter)")
         workouts_df["week"] = workouts_df["date"].dt.isocalendar().week
         weekly_summary = workouts_df.groupby("week")["duration_min"].sum().reset_index()
@@ -149,7 +166,7 @@ with tab2:
             st.write(f"**{goal['title']}** (Mål: {goal['target']})")
             st.progress(goal["progress"] / 100)
     else:
-        st.info("Inga aktiva löpmål tillagda ännu. Gå till flik 4 för att lägga till mål.")
+        st.info("Inga aktiva löpmål tillagda ännu.")
     
     st.markdown("---")
     
@@ -197,11 +214,10 @@ with tab3:
             st.write(f"**{goal['title']}** (Mål: {goal['target']})")
             st.progress(goal["progress"] / 100)
     else:
-        st.info("Inga aktiva styrkemål tillagda ännu. Gå till flik 4 för att lägga till mål.")
+        st.info("Inga aktiva styrkemål tillagda ännu.")
         
     st.markdown("---")
     st.subheader("⚙️ Redigera & Hantera Styrkepass")
-    st.write("Du kan enkelt klicka och ändra övningar, vikter och repetitioner i tabellen nedan:")
     
     strength_df = workouts_df[workouts_df["type"].str.contains("Styrka", case=False, na=False)] if not workouts_df.empty else pd.DataFrame()
     
@@ -234,20 +250,30 @@ with tab4:
                 st.session_state.goals.append({"category": new_cat, "title": new_title, "progress": new_progress, "target": new_target})
                 st.success("Målet har lagts till och synkas till respektive sida!")
                 
-        st.subheader("👤 Kroppsdata & Återhämtning")
+        st.markdown("---")
+        st.subheader("💤 Detaljerad Sömn- & Hälsodata")
         st.metric("Längd", "182 cm")
         st.metric("Vikt", "76.5 kg")
-        if not sleep_df.empty and "duration_hours" in sleep_df.columns:
+        
+        if not sleep_df.empty:
             avg_sleep = sleep_df["duration_hours"].mean()
-            st.metric("Sömnsnitt", f"{avg_sleep:.1f} timmar")
-            st.markdown("### Sömnutveckling")
+            st.metric("Genomsnittlig sömntid", f"{avg_sleep:.1f} timmar")
+            
+            st.markdown("#### Sömnhistorik")
+            display_sleep = sleep_df.copy()
+            if "date" in display_sleep.columns:
+                display_sleep["date"] = display_sleep["date"].dt.strftime('%Y-%m-%d')
+            st.dataframe(display_sleep[["date", "duration_hours"]].sort_values(by="date", ascending=False).head(5), use_container_width=True)
+            
+            st.markdown("### Sömnutveckling över tid")
             st.line_chart(sleep_df.set_index("date")["duration_hours"])
         else:
             st.metric("Sömnsnitt senaste 7 dagar", "7.8 timmar")
+            st.info("Ingen sömndata hittades i databasen.")
 
     with col_b:
         st.subheader("🤖 Din Personliga AI-Coach (Gratis via Groq)")
-        st.write("Fråga om träningsupplägg, återhämtning eller vilka pass du bör köra härnäst.")
+        st.write("Fråga om hur du har sovit, träningsupplägg, återhämtning eller vilka pass du bör köra.")
         
         if "GROQ_API_KEY" in st.secrets:
             client_groq = openai.OpenAI(
@@ -255,8 +281,24 @@ with tab4:
                 api_key=st.secrets["GROQ_API_KEY"]
             )
             
+            # Förbered kontext från databasen för AI-coachen
+            sleep_summary = "Ingen sömnsdata tillgänglig i databasen."
+            if not sleep_df.empty:
+                latest_sleep = sleep_df.sort_values(by="date", ascending=False).iloc[0]
+                sleep_summary = f"Senaste sömnen ({str(latest_sleep.get('date', ''))[:10]}): Längd: {latest_sleep.get('duration_hours', 'okänd')} timmar."
+            
+            workouts_summary = f"Antal registrerade pass totalt: {len(workouts_df)}" if not workouts_df.empty else "Inga träningspass registrerade."
+            goals_summary = ", ".join([g['title'] for g in st.session_state.goals])
+
+            system_prompt = f"""Du är en personlig tränings- och hälsocoach. Du har direkt tillgång till användarens data från databasen:
+- Sömndata: {sleep_summary}
+- Träning: {workouts_summary}
+- Aktiva mål: {goals_summary}
+
+När användaren frågar om sin sömn (t.ex. 'hur har jag sovit idag?') eller träning, ska du använda denna faktiska data för att ge ett personligt, träffsäkert och engagerat svar."""
+
             if "messages" not in st.session_state:
-                st.session_state.messages = [{"role": "assistant", "content": "Hej! Vad vill du ha hjälp med gällande din träning idag?"}]
+                st.session_state.messages = [{"role": "assistant", "content": "Hej! Jag har full koll på din sömn och din träningsdata. Vad vill du veta eller ha hjälp med idag?"}]
                 
             for message in st.session_state.messages:
                 with st.chat_message(message["role"]):
@@ -268,9 +310,11 @@ with tab4:
                     st.markdown(prompt)
                     
                 try:
+                    full_messages = [{"role": "system", "content": system_prompt}] + [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+                    
                     response = client_groq.chat.completions.create(
                         model="llama-3.3-70b-versatile",
-                        messages=[{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+                        messages=full_messages
                     )
                     answer = response.choices[0].message.content
                 except Exception as e:
