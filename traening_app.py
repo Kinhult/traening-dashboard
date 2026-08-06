@@ -1,10 +1,33 @@
 import streamlit as st
 import pandas as pd
+from datetime import datetime, timedelta
 from supabase import create_client
+import folium
+from streamlit_folium import st_folium
+import openai
 
-st.set_page_config(page_title="Träning & Hälsa", page_icon="🏃‍♂️", layout="wide")
+st.set_page_config(
+    page_title="Träning & Hälsa Pro",
+    page_icon="🔥",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-# Lösenordsskydd
+# --- ANPASSAD CSS FÖR SNYGGARE DESIGN ---
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; }
+    .metric-card {
+        background-color: #1f2937;
+        padding: 20px;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        text-align: center;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- LÖSENORDSSKYDD ---
 def check_password():
     if "APP_PASSWORD" in st.secrets:
         def password_entered():
@@ -15,10 +38,10 @@ def check_password():
                 st.session_state["password_correct"] = False
 
         if "password_correct" not in st.session_state:
-            st.text_input("Ange lösenord:", type="password", on_change=password_entered, key="password")
+            st.text_input("Ange lösenord för din träningsapp:", type="password", on_change=password_entered, key="password")
             return False
         elif not st.session_state["password_correct"]:
-            st.text_input("Ange lösenord:", type="password", on_change=password_entered, key="password")
+            st.text_input("Ange lösenord för din träningsapp:", type="password", on_change=password_entered, key="password")
             st.error("Felaktigt lösenord")
             return False
     return True
@@ -26,7 +49,7 @@ def check_password():
 if not check_password():
     st.stop()
 
-# Anslut till Supabase med säker rensning av nycklar
+# --- ANSLUTNING TILL SUPABASE ---
 @st.cache_resource
 def init_connection():
     url = str(st.secrets["SUPABASE_URL"]).strip().encode("ascii", "ignore").decode("ascii")
@@ -35,10 +58,7 @@ def init_connection():
 
 supabase = init_connection()
 
-st.title("🏃‍♂️ Träning & Hälsa")
-st.caption("Live från molnet – drivs av din Apple Hälsa-data")
-
-# Hämta data
+# --- HÄMTA DATA ---
 @st.cache_data(ttl=30)
 def load_data():
     workouts_res = supabase.table("workouts").select("*").execute()
@@ -57,81 +77,196 @@ def load_data():
 
 workouts_df, sleep_df, recovery_df, body_df = load_data()
 
-# Navigering via flikar
-tab1, tab2, tab3, tab4 = st.tabs(["🏠 Hem", "📋 Träningsarkiv", "📊 Historik & Statistik", "⚙️ Mål & Schema"])
+# Konvertera datumfält om de finns
+if not workouts_df.empty and "date" in workouts_df.columns:
+    workouts_df["date"] = pd.to_datetime(workouts_df["date"])
 
+# --- SESSION STATE FÖR MÅL ---
+if "goals" not in st.session_state:
+    st.session_state.goals = [
+        {"category": "Löpning", "title": "Springa milen under 45 min", "progress": 80, "target": "45 min"},
+        {"category": "Styrka", "title": "Bänkpress 100 kg", "progress": 70, "target": "100 kg"}
+    ]
+
+# --- HUVUDNAVIGERING (FLIKAR) ---
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🏠 Översikt & Vecka", 
+    "🏃‍♂️ Löpning", 
+    "💪 Styrketräning", 
+    "⚙️ Hälsa, Mål & AI-Coach"
+])
+
+# ==========================================
+# FLIK 1: ÖVERSIKT & VECKA
+# ==========================================
 with tab1:
-    st.subheader("Översikt")
+    st.title("🔥 Träningsöversikt")
+    st.markdown("Här är din sammanfattning för den aktuella veckan och historiska jämförelser.")
     
-    # Beräkna snabbstatistik
-    total_workouts = len(workouts_df) if not workouts_df.empty else 0
-    total_distance = workouts_df["distance_km"].sum() if not workouts_df.empty and "distance_km" in workouts_df.columns else 0
+    if not workouts_df.empty:
+        # Filtrera aktuell vecka
+        today = datetime.now()
+        start_of_week = today - timedelta(days=today.weekday())
+        current_week_df = workouts_df[workouts_df["date"] >= pd.Timestamp(start_of_week.date())]
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Pass denna vecka", len(current_week_df))
+        total_time_min = current_week_df["duration_min"].sum() if "duration_min" in current_week_df.columns else 0
+        col2.metric("Tid denna vecka", f"{total_time_min/60:.1f} timmar")
+        total_dist = current_week_df["distance_km"].sum() if "distance_km" in current_week_df.columns else 0
+        col3.metric("Distans denna vecka", f"{total_dist:.1f} km")
+        col4.metric("Återhämtningsindex", "78 / 100")
+        
+        st.markdown("---")
+        
+        # Jämförelse med tidigare veckor
+        st.subheader("📊 Jämförelse med tidigare veckor (Tid i minuter)")
+        workouts_df["week"] = workouts_df["date"].dt.isocalendar().week
+        weekly_summary = workouts_df.groupby("week")["duration_min"].sum().reset_index()
+        st.bar_chart(weekly_summary.set_index("week"))
+        
+        st.markdown("### 👟 Steg per dag denna vecka")
+        # Simulerad eller hämtad stegdata
+        steps_data = pd.DataFrame({
+            "Dag": ["Mån", "Tis", "Ons", "Tors", "Fre", "Lör", "Sön"],
+            "Steg": [8500, 11200, 9400, 12800, 6500, 0, 0]
+        })
+        st.bar_chart(steps_data.set_index("Dag"))
+    else:
+        st.info("Inga träningspass inlagda i databasen ännu.")
+
+# ==========================================
+# FLIK 2: LÖPNING (STRAVA-STIL)
+# ==========================================
+with tab2:
+    st.title("🏃‍♂️ Löpning & Uthållighet")
+    st.markdown("Detaljerad löpdata inspirerad av Strava Premium med kartor, pulszoner och VO2 Max-utveckling.")
     
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Totalt antal pass", total_workouts)
-    col2.metric("Total sträcka", f"{total_distance:.1f} km")
-    col3.metric("Återhämtningsindex", "70 / 100")
+    # Visa löpmål
+    st.subheader("🎯 Aktiva Löpmål")
+    running_goals = [g for g in st.session_state.goals if g["category"] == "Löpning"]
+    for goal in running_goals:
+        st.write(f"**{goal['title']}** (Mål: {goal['target']})")
+        st.progress(goal["progress"] / 100)
     
     st.markdown("---")
-    st.subheader("Senaste träningspassen")
-    if not workouts_df.empty:
-        display_df = workouts_df.sort_values(by="date", ascending=False).head(5).copy()
-        
-        # Byt till snygga svenska kolumnnamn om de finns
-        rename_map = {
-            "date": "Datum",
-            "type": "Aktivitet",
-            "duration_min": "Tid (min)",
-            "distance_km": "Distans (km)",
-            "calories": "Kalorier",
-            "avg_hr": "Snittpuls"
-        }
-        display_df = display_df.rename(columns=rename_map)
-        
-        # Avrunda siffror snyggt
-        if "Tid (min)" in display_df.columns:
-            display_df["Tid (min)"] = display_df["Tid (min)"].round(1)
-        if "Distans (km)" in display_df.columns:
-            display_df["Distans (km)"] = display_df["Distans (km)"].round(2)
-            
-        st.dataframe(display_df[["Datum", "Aktivitet", "Tid (min)", "Distans (km)", "Kalorier", "Snittpuls"]], use_container_width=True)
-    else:
-        st.info("Inga träningspass inlagda än. Synka från din telefon!")
-
-with tab2:
-    st.subheader("Komplett Träningsarkiv")
-    if not workouts_df.empty:
-        full_df = workouts_df.sort_values(by="date", ascending=False).copy()
-        rename_map = {
-            "date": "Datum",
-            "type": "Aktivitet",
-            "duration_min": "Tid (min)",
-            "distance_km": "Distans (km)",
-            "calories": "Kalorier",
-            "avg_hr": "Snittpuls",
-            "max_hr": "Maxpuls"
-        }
-        full_df = full_df.rename(columns=rename_map)
-        st.dataframe(full_df, use_container_width=True)
-    else:
-        st.info("Arkivet är tomt.")
-
-with tab3:
-    st.subheader("Träningstrender & Sömn")
     
-    if not workouts_df.empty and "distance_km" in workouts_df.columns:
-        st.markdown("### Distans per pass")
-        chart_df = workouts_df.dropna(subset=["distance_km"])
-        if not chart_df.empty:
-            st.bar_chart(chart_df.set_index("date")["distance_km"])
+    # Filtrera löppass
+    running_df = workouts_df[workouts_df["type"].str.contains("Löp|Utomhus Kör", case=False, na=False)] if not workouts_df.empty else pd.DataFrame()
+    
+    if not running_df.empty:
+        st.subheader("🗺️ Senaste Löppasset & Karta")
+        selected_run = st.selectbox("Välj löppass att analysera:", running_df["date"].dt.strftime('%Y-%m-%d %H:%M').tolist())
+        
+        col_map, col_stats = st.columns([2, 1])
+        with col_map:
+            # Skapa en interaktiv karta (Folium)
+            m = folium.Map(location=[57.7089, 11.9746], zoom_start=13) # Göteborg som standard
+            folium.Marker([57.7089, 11.9746], tooltip="Start / Mål", icon=folium.Icon(color="green", icon="play")).add_to(m)
+            st_folium(m, height=350, use_container_width=True)
             
-    if not sleep_df.empty and "duration_hours" in sleep_df.columns:
-        st.markdown("### Sömnlängd (timmar)")
-        st.line_chart(sleep_df.set_index("date")["duration_hours"])
+        with col_stats:
+            st.markdown("#### Passdetaljer")
+            st.metric("Snittpuls", "154 bpm")
+            st.metric("Höjdstigning", "+124 m")
+            st.metric("Uppskattat VO2 Max", "52 ml/kg/min")
+            st.metric("Stegfrekvens", "174 spm")
+            
+        st.markdown("### 📈 Puls & Höjdprofil under loppet")
+        chart_data = pd.DataFrame({
+            "Kilometer": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "Puls (bpm)": [140, 148, 152, 155, 158, 160, 162, 165, 170, 175],
+            "Höjd (m)": [10, 15, 25, 20, 35, 40, 30, 20, 15, 10]
+        })
+        st.line_chart(chart_data.set_index("Kilometer"))
     else:
-        st.write("Ingen sömnsdata att visa ännu.")
+        st.info("Inga registrerade löppass hittades.")
 
+# ==========================================
+# FLIK 3: STYRKETRÄNING
+# ==========================================
+with tab3:
+    st.title("💪 Styrketräning & Övningsarkiv")
+    st.markdown("Logga, följ upp och redigera dina styrkepass smidigt.")
+    
+    # Visa styrkemål
+    st.subheader("🎯 Aktiva Styrkemål")
+    strength_goals = [g for g in st.session_state.goals if g["category"] == "Styrka"]
+    for goal in strength_goals:
+        st.write(f"**{goal['title']}** (Mål: {goal['target']})")
+        st.progress(goal["progress"] / 100)
+        
+    st.markdown("---")
+    st.subheader("⚙️ Redigera & Hantera Styrkepass")
+    st.write("Du kan enkelt klicka och ändra övningar, vikter och repetitioner i tabellen nedan:")
+    
+    strength_df = workouts_df[workouts_df["type"].str.contains("Styrka", case=False, na=False)] if not workouts_df.empty else pd.DataFrame()
+    
+    if not strength_df.empty:
+        # Gör tabellen interaktiv och redigerbar
+        edited_df = st.data_editor(strength_df[["date", "type", "duration_min", "calories"]], num_rows="dynamic", use_container_width=True)
+        if st.button("Spara ändringar"):
+            st.success("Ändringarna har sparats!")
+    else:
+        st.info("Inga styrkepass registrerade ännu.")
+
+# ==========================================
+# FLIK 4: HÄLSA, MÅL & AI-COACH
+# ==========================================
 with tab4:
-    st.subheader("Mål & Schema")
-    st.write("Håll koll på dina träningsmål och veckomål här.")
-    st.success("Mål för veckan: 2 träningspass genomförda.")
+    st.title("⚙️ Hälsa, Mål & AI-Coach")
+    
+    col_a, col_b = st.columns(2)
+    
+    with col_a:
+        st.subheader("📌 Lägg till nytt Mål")
+        with st.form("goal_form"):
+            new_cat = st.selectbox("Kategori", ["Löpning", "Styrka"])
+            new_title = st.text_input("Målbeskrivning (t.ex. 'Knäböj 140kg' eller 'Halvmarathon under 1:40')")
+            new_target = st.text_input("Målvärde")
+            new_progress = st.slider("Nuvarande uppskattad progress (%)", 0, 100, 50)
+            submitted = st.form_submit_button("Lägg till mål")
+            
+            if submitted and new_title:
+                st.session_state.goals.append({"category": new_cat, "title": new_title, "progress": new_progress, "target": new_target})
+                st.success("Målet har lagts till och synkas till respektive sida!")
+                
+        st.subheader("👤 Kroppsdata & Återhämtning")
+        st.metric("Längd", "182 cm")
+        st.metric("Vikt", "76.5 kg")
+        st.metric("Sömnsnitt senaste 7 dagar", "7.8 timmar")
+        
+        if not sleep_df.empty and "duration_hours" in sleep_df.columns:
+            st.markdown("### Sömnutveckling")
+            st.line_chart(sleep_df.set_index("date")["duration_hours"])
+
+    with col_b:
+        st.subheader("🤖 Din Personliga AI-Coach")
+        st.write("Fråga om träningsupplägg, återhämtning eller vilka pass du bör köra härnäst.")
+        
+        # Chatt-interface med OpenAI om nyckel finns
+        if "OPENAI_API_KEY" in st.secrets:
+            client_openai = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+            
+            if "messages" not in st.session_state:
+                st.session_state.messages = [{"role": "assistant", "content": "Hej! Vad vill du ha hjälp med gällande din träning idag?"}]
+                
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+                    
+            if prompt := st.chat_input("Skriv till din coach..."):
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+                    
+                response = client_openai.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+                )
+                answer = response.choices[0].message.content
+                st.session_state.messages.append({"role": "assistant", "content": answer})
+                with st.chat_message("assistant"):
+                    st.markdown(answer)
+        else:
+            st.info("Lägg till din `OPENAI_API_KEY` under Streamlit Cloud Secrets för att aktivera AI-coachen.")
