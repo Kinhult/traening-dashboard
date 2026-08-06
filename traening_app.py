@@ -81,6 +81,9 @@ workouts_df, sleep_df, recovery_df, body_df = load_data()
 if not workouts_df.empty and "date" in workouts_df.columns:
     workouts_df["date"] = pd.to_datetime(workouts_df["date"])
 
+if not sleep_df.empty and "date" in sleep_df.columns:
+    sleep_df["date"] = pd.to_datetime(sleep_df["date"])
+
 # --- SESSION STATE FÖR MÅL ---
 if "goals" not in st.session_state:
     st.session_state.goals = [
@@ -104,7 +107,6 @@ with tab1:
     st.markdown("Här är din sammanfattning för den aktuella veckan och historiska jämförelser.")
     
     if not workouts_df.empty:
-        # Filtrera aktuell vecka
         today = datetime.now()
         start_of_week = today - timedelta(days=today.weekday())
         current_week_df = workouts_df[workouts_df["date"] >= pd.Timestamp(start_of_week.date())]
@@ -113,20 +115,18 @@ with tab1:
         col1.metric("Pass denna vecka", len(current_week_df))
         total_time_min = current_week_df["duration_min"].sum() if "duration_min" in current_week_df.columns else 0
         col2.metric("Tid denna vecka", f"{total_time_min/60:.1f} timmar")
-        total_dist = current_week_df["distance_km"].sum() if "distance_km" in current_week_df.columns else 0
+        total_dist = current_week_df["distance_km"].sum() if "distance_km" in current_week_df.columns and current_week_df["distance_km"].notnull().any() else 0
         col3.metric("Distans denna vecka", f"{total_dist:.1f} km")
         col4.metric("Återhämtningsindex", "78 / 100")
         
         st.markdown("---")
         
-        # Jämförelse med tidigare veckor
         st.subheader("📊 Jämförelse med tidigare veckor (Tid i minuter)")
         workouts_df["week"] = workouts_df["date"].dt.isocalendar().week
         weekly_summary = workouts_df.groupby("week")["duration_min"].sum().reset_index()
         st.bar_chart(weekly_summary.set_index("week"))
         
         st.markdown("### 👟 Steg per dag denna vecka")
-        # Simulerad eller hämtad stegdata
         steps_data = pd.DataFrame({
             "Dag": ["Mån", "Tis", "Ons", "Tors", "Fre", "Lör", "Sön"],
             "Steg": [8500, 11200, 9400, 12800, 6500, 0, 0]
@@ -142,26 +142,27 @@ with tab2:
     st.title("🏃‍♂️ Löpning & Uthållighet")
     st.markdown("Detaljerad löpdata inspirerad av Strava Premium med kartor, pulszoner och VO2 Max-utveckling.")
     
-    # Visa löpmål
     st.subheader("🎯 Aktiva Löpmål")
     running_goals = [g for g in st.session_state.goals if g["category"] == "Löpning"]
-    for goal in running_goals:
-        st.write(f"**{goal['title']}** (Mål: {goal['target']})")
-        st.progress(goal["progress"] / 100)
+    if running_goals:
+        for goal in running_goals:
+            st.write(f"**{goal['title']}** (Mål: {goal['target']})")
+            st.progress(goal["progress"] / 100)
+    else:
+        st.info("Inga aktiva löpmål tillagda ännu. Gå till flik 4 för att lägga till mål.")
     
     st.markdown("---")
     
-    # Filtrera löppass
     running_df = workouts_df[workouts_df["type"].str.contains("Löp|Utomhus Kör", case=False, na=False)] if not workouts_df.empty else pd.DataFrame()
     
     if not running_df.empty:
         st.subheader("🗺️ Senaste Löppasset & Karta")
-        selected_run = st.selectbox("Välj löppass att analysera:", running_df["date"].dt.strftime('%Y-%m-%d %H:%M').tolist())
+        run_options = running_df["date"].dt.strftime('%Y-%m-%d %H:%M').tolist()
+        selected_run = st.selectbox("Välj löppass att analysera:", run_options)
         
         col_map, col_stats = st.columns([2, 1])
         with col_map:
-            # Skapa en interaktiv karta (Folium)
-            m = folium.Map(location=[57.7089, 11.9746], zoom_start=13) # Göteborg som standard
+            m = folium.Map(location=[57.7089, 11.9746], zoom_start=13)
             folium.Marker([57.7089, 11.9746], tooltip="Start / Mål", icon=folium.Icon(color="green", icon="play")).add_to(m)
             st_folium(m, height=350, use_container_width=True)
             
@@ -189,12 +190,14 @@ with tab3:
     st.title("💪 Styrketräning & Övningsarkiv")
     st.markdown("Logga, följ upp och redigera dina styrkepass smidigt.")
     
-    # Visa styrkemål
     st.subheader("🎯 Aktiva Styrkemål")
     strength_goals = [g for g in st.session_state.goals if g["category"] == "Styrka"]
-    for goal in strength_goals:
-        st.write(f"**{goal['title']}** (Mål: {goal['target']})")
-        st.progress(goal["progress"] / 100)
+    if strength_goals:
+        for goal in strength_goals:
+            st.write(f"**{goal['title']}** (Mål: {goal['target']})")
+            st.progress(goal["progress"] / 100)
+    else:
+        st.info("Inga aktiva styrkemål tillagda ännu. Gå till flik 4 för att lägga till mål.")
         
     st.markdown("---")
     st.subheader("⚙️ Redigera & Hantera Styrkepass")
@@ -203,10 +206,10 @@ with tab3:
     strength_df = workouts_df[workouts_df["type"].str.contains("Styrka", case=False, na=False)] if not workouts_df.empty else pd.DataFrame()
     
     if not strength_df.empty:
-        # Gör tabellen interaktiv och redigerbar
-        edited_df = st.data_editor(strength_df[["date", "type", "duration_min", "calories"]], num_rows="dynamic", use_container_width=True)
+        cols_to_show = [c for c in ["date", "type", "duration_min", "calories"] if c in strength_df.columns]
+        edited_df = st.data_editor(strength_df[cols_to_show], num_rows="dynamic", use_container_width=True)
         if st.button("Spara ändringar"):
-            st.success("Ändringarna har sparats!")
+            st.success("Ändringarna har sparats lokalt!")
     else:
         st.info("Inga styrkepass registrerade ännu.")
 
@@ -222,8 +225,8 @@ with tab4:
         st.subheader("📌 Lägg till nytt Mål")
         with st.form("goal_form"):
             new_cat = st.selectbox("Kategori", ["Löpning", "Styrka"])
-            new_title = st.text_input("Målbeskrivning (t.ex. 'Knäböj 140kg' eller 'Halvmarathon under 1:40')")
-            new_target = st.text_input("Målvärde")
+            new_title = st.text_input("Målbeskrivning (t.ex. 'Knäböj 140kg')")
+            new_target = st.text_input("Målvärde (t.ex. '140 kg' eller '45 min')")
             new_progress = st.slider("Nuvarande uppskattad progress (%)", 0, 100, 50)
             submitted = st.form_submit_button("Lägg till mål")
             
@@ -234,19 +237,23 @@ with tab4:
         st.subheader("👤 Kroppsdata & Återhämtning")
         st.metric("Längd", "182 cm")
         st.metric("Vikt", "76.5 kg")
-        st.metric("Sömnsnitt senaste 7 dagar", "7.8 timmar")
-        
         if not sleep_df.empty and "duration_hours" in sleep_df.columns:
+            avg_sleep = sleep_df["duration_hours"].mean()
+            st.metric("Sömnsnitt", f"{avg_sleep:.1f} timmar")
             st.markdown("### Sömnutveckling")
             st.line_chart(sleep_df.set_index("date")["duration_hours"])
+        else:
+            st.metric("Sömnsnitt senaste 7 dagar", "7.8 timmar")
 
     with col_b:
-        st.subheader("🤖 Din Personliga AI-Coach")
+        st.subheader("🤖 Din Personliga AI-Coach (Gratis via Groq)")
         st.write("Fråga om träningsupplägg, återhämtning eller vilka pass du bör köra härnäst.")
         
-        # Chatt-interface med OpenAI om nyckel finns
-        if "OPENAI_API_KEY" in st.secrets:
-            client_openai = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+        if "GROQ_API_KEY" in st.secrets:
+            client_groq = openai.OpenAI(
+                base_url="https://api.groq.com/openai/v1",
+                api_key=st.secrets["GROQ_API_KEY"]
+            )
             
             if "messages" not in st.session_state:
                 st.session_state.messages = [{"role": "assistant", "content": "Hej! Vad vill du ha hjälp med gällande din träning idag?"}]
@@ -260,13 +267,17 @@ with tab4:
                 with st.chat_message("user"):
                     st.markdown(prompt)
                     
-                response = client_openai.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
-                )
-                answer = response.choices[0].message.content
+                try:
+                    response = client_groq.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+                    )
+                    answer = response.choices[0].message.content
+                except Exception as e:
+                    answer = f"Ett fel uppstod vid anrop till AI-coachen: {e}"
+                    
                 st.session_state.messages.append({"role": "assistant", "content": answer})
                 with st.chat_message("assistant"):
                     st.markdown(answer)
         else:
-            st.info("Lägg till din `OPENAI_API_KEY` under Streamlit Cloud Secrets för att aktivera AI-coachen.")
+            st.info("Lägg till din `GROQ_API_KEY` under Streamlit Cloud Secrets för att aktivera AI-coachen helt gratis.")
