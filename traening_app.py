@@ -136,7 +136,7 @@ if "goals" not in st.session_state:
         {"category": "Styrka", "title": "Bänkpress 100 kg", "progress": 70, "target": "100 kg"}
     ]
 
-# --- NAVIGERING (MED STATISTIK ALLRA LÄNGST TILL HÖGER) ---
+# --- NAVIGERING (STATISTIK ALLRA LÄNGST TILL HÖGER) ---
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "❤️ Översikt (Hälsa)", 
     "🏃‍♂️ Löpning & Pass", 
@@ -202,16 +202,15 @@ with tab2:
         selected_idx = run_options.index(selected_run_str)
         selected_run = running_df.iloc[selected_idx]
         
-        st.markdown(f"### 🌙 Löpning på natten – {selected_run['date'].strftime('%Y-%m-%d')}")
+        st.markdown(f"### 🌙 Passdetaljer – {selected_run['date'].strftime('%Y-%m-%d')}")
         
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Distans", "10,13 km")
-        col2.metric("Tid i rörelse", "47:48")
-        col3.metric("Genomsnittligt tempo", "4:43 /km")
-        col4.metric("Höjdökning", "53 m")
+        col1.metric("Distans", f"{selected_run.get('distance_km', 10.13):.2f} km")
+        col2.metric("Tid i rörelse", f"{selected_run.get('duration_min', 47.8):.0f} min")
+        col3.metric("Kalorier", f"{selected_run.get('calories', 703)} kcal")
+        col4.metric("Snittpuls", f"{selected_run.get('avg_hr', 164)} bpm")
         
         st.markdown("---")
-        
         st.subheader("🗺️ GPS-karta (Ljungby)")
         m = folium.Map(location=[56.8333, 13.9333], zoom_start=13, tiles="CartoDB dark_matter")
         route_coords = [
@@ -221,27 +220,17 @@ with tab2:
         ]
         folium.PolyLine(route_coords, color="#fc4c02", weight=4, opacity=0.9).add_to(m)
         st_folium(m, height=350, use_container_width=True)
-        
-        st.markdown("---")
-        st.subheader("📊 Deltider per kilometer")
-        splits_data = pd.DataFrame({
-            "Km": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, "0,1"],
-            "Tempo": ["5:10", "4:48", "4:36", "4:30", "4:27", "4:40", "4:40", "4:35", "4:51", "4:52", "4:59"],
-            "Höjd (m)": [-17, 9, 6, -1, -10, 0, -7, 0, 10, 1, 2],
-            "Puls (bpm)": [141, 157, 162, 166, 167, 168, 167, 173, 172, 171, 172]
-        })
-        st.dataframe(splits_data, use_container_width=True)
     else:
         st.info("Inga löppass hittades.")
 
 # ==========================================
-# FLIK 3: STYRKETRÄNING & MUSKELÅTERHÄMTNING
+# FLIK 3: STYRKETRÄNING & MUSKELSTATUS
 # ==========================================
 with tab3:
     st.title("💪 Styrketräning & Muskelstatus")
-    st.markdown("Följ upp dina styrkepass, se vilka muskelgrupper som behöver vila (rödmarkerade) och logga nya övningar.")
+    st.markdown("Logga pass med standardmallar eller välj tidigare pass för att se detaljer och muskelåterhämtning.")
     
-    # Muskelgruppernas status (Heatmap-status)
+    # Muskelstatus (Heatmap)
     st.subheader("🔥 Muskelåterhämtning")
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.markdown('<div class="muscle-card"><span style="color: #ff453a; font-weight:bold;">🔴 Ben / Glutes</span><br>Behöver vila</div>', unsafe_allow_html=True)
@@ -251,9 +240,42 @@ with tab3:
     m5.markdown('<div class="muscle-card"><span style="color: #ff453a; font-weight:bold;">🔴 Core</span><br>Trött</div>', unsafe_allow_html=True)
     
     st.markdown("---")
-    st.subheader("⚙️ Logga ny styrkeövning")
     
-    selected_exercise = st.selectbox("Välj övning:", ["Marklyft (Deadlift)", "Bänkpress", "Knäböj (Squats)", "Chins / Pullups", "Militärpress"])
+    # Välj tidigare pass för att se detaljer
+    strength_df = workouts_df[workouts_df["type"].str.contains("Styrka|Traditionell|Bröst|Rygg|Armar|Axlar|Ben", case=False, na=False)] if not workouts_df.empty else pd.DataFrame()
+    
+    if not strength_df.empty:
+        st.subheader("📂 Välj tidigare styrkepass")
+        strength_df = strength_df.sort_values(by="date", ascending=False)
+        strength_options = strength_df.apply(lambda row: f"{row['date'].strftime('%Y-%m-%d %H:%M')} – {row.get('type', 'Styrka')} ({row.get('duration_min', 45):.0f} min)", axis=1).tolist()
+        
+        selected_strength_str = st.selectbox("Välj pass att granska:", strength_options)
+        selected_s_idx = strength_options.index(selected_strength_str)
+        selected_pass = strength_df.iloc[selected_s_idx]
+        
+        st.markdown(f"### Passdetaljer: {selected_pass.get('type', 'Styrka')}")
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric("Datum", selected_pass['date'].strftime('%Y-%m-%d'))
+        sc2.metric("Tid", f"{selected_pass.get('duration_min', 0):.0f} min")
+        sc3.metric("Kalorier", f"{selected_pass.get('calories', 0)} kcal")
+        sc4.metric("Typ", selected_pass.get('type', 'Styrka'))
+    
+    st.markdown("---")
+    st.subheader("⚙️ Logga nytt pass / Standardmallar")
+    
+    # Meny med standardmallar eller egen
+    workout_template = st.selectbox(
+        "Välj pass-typ (Standard eller Anpassad):",
+        ["Bröst, axlar, triceps pass", "Rygg, biceps, axlar", "Armar", "Axlar", "Benpass", "Eget pass (Anpassat)"]
+    )
+    
+    if workout_template == "Eget pass (Anpassat)":
+        custom_type = st.text_input("Skriv egen typ av pass:")
+        pass_type_to_save = custom_type if custom_type else "Anpassat pass"
+    else:
+        pass_type_to_save = workout_template
+        
+    selected_exercise = st.selectbox("Välj övning:", ["Marklyft (Deadlift)", "Bänkpress", "Knäböj (Squats)", "Chins / Pullups", "Militärpress", "Hantelpress", "Bicepscurl", "Triceps pushdown"])
     
     col_ex1, col_ex2, col_ex3 = st.columns(3)
     with col_ex1:
@@ -263,26 +285,8 @@ with tab3:
     with col_ex3:
         sets_input = st.number_input("Set", value=3, step=1)
         
-    if st.button("Spara övning"):
-        st.success(f"Sparat! {selected_exercise}: {sets_input} set x {reps_input} reps på {weight_input} kg.")
-        
-    st.markdown("---")
-    st.subheader("📋 Dina registrerade styrkepass (Redigerbara)")
-    
-    # Filtrera fram styrkepass (fångar "Traditionell styrketräning" och "Styrka")
-    strength_df = workouts_df[workouts_df["type"].str.contains("Styrka|Traditionell", case=False, na=False)] if not workouts_df.empty else pd.DataFrame()
-    
-    if not strength_df.empty:
-        cols_to_show = [c for c in ["date", "type", "duration_min", "calories"] if c in strength_df.columns]
-        edited_strength_df = st.data_editor(strength_df[cols_to_show], num_rows="dynamic", use_container_width=True)
-        if st.button("Spara ändringar i pass"):
-            st.success("Styrkepassen har uppdaterats!")
-    else:
-        st.info("Inga styrkepass hittades i databasen med filtret 'Styrka/Traditionell'. Visar alla tillgängliga pass nedan:")
-        if not workouts_df.empty:
-            st.data_editor(workouts_df, num_rows="dynamic", use_container_width=True)
-        else:
-            st.info("Databasen är tom.")
+    if st.button("Spara pass & övning"):
+        st.success(f"Sparat! Pass: {pass_type_to_save} | Övning: {selected_exercise} ({sets_input} set x {reps_input} reps på {weight_input} kg).")
 
 # ==========================================
 # FLIK 4: SÖMNANALYS (APPLE HÄLSA-STIL)
@@ -315,20 +319,6 @@ with tab4:
         "Sömntid (timmar)": [7.5, 8.0, 7.2, 4.2, 3.8, 7.6, 6.5]
     })
     st.bar_chart(sleep_chart_data.set_index("Dag"), color="#0a84ff")
-    
-    st.markdown("### 🫀 Vitalparametrar under sömn")
-    vp1, vp2 = st.columns(2)
-    with vp1:
-        st.metric("Puls under sömn", "39 – 48 slag/min", "Typiskt 🟢")
-    with vp2:
-        st.metric("Andningsfrekvens", "10,5 – 16 andetag/min", "Typiskt 🟢")
-
-    if not sleep_df.empty:
-        st.markdown("### 📋 Tidigare nätters sömndata från databas")
-        display_sleep = sleep_df.copy()
-        if "date" in display_sleep.columns:
-            display_sleep["date"] = display_sleep["date"].dt.strftime('%Y-%m-%d')
-        st.dataframe(display_sleep.sort_values(by="date", ascending=False), use_container_width=True)
 
 # ==========================================
 # FLIK 5: DU & AI-COACH
